@@ -251,23 +251,13 @@ watch(() => continueStatus.value.remaining_seconds, (newSeconds) => {
 async function loadGameRoom() {
   try {
     loading.value = true
-
-    // Permitir que /game/:id venga con un roomId y resolverlo
+    // Si el id no es válido, devolver a rooms (no intentamos /api/rooms/*)
     if (!isValidObjectId(gameId.value)) {
-      try {
-        const roomResp = await apiClient.get(`/rooms/${gameId.value}`)
-        const gid = roomResp?.data?.game_id
-        if (gid && isValidObjectId(gid)) {
-          router.replace({ name: 'game', params: { id: gid } })
-          return
-        }
-      } catch {
-        router.replace({ name: 'rooms' })
-        return
-      }
+      router.replace({ name: 'rooms' })
+      return
     }
 
-  const meta = await apiGames.get(gameId.value)
+    const meta = await apiGames.get(gameId.value)
   roomIdForGame.value = meta.room_id || null
     const chapters = await apiGames.listChapters(gameId.value)
     const messages = await apiGames.listMessages(gameId.value, 50, 0)
@@ -459,12 +449,20 @@ function connectWebSocket() {
   const base = import.meta.env.VITE_WS_BASE_URL || ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host)
   ws = new WebSocket(`${base}/api/ws/game/${gameId.value}?token=${token}`)
 
-  ws.onopen = () => { isConnected.value = true; console.log('[GameWS] connected') }
+  ws.onopen = async () => { isConnected.value = true; console.log('[GameWS] connected'); try { await loadGameRoom() } catch (e) { console.error('Error loading game on WS open:', e) } }
 
   ws.onmessage = async (event) => {
     try {
       const data = JSON.parse(event.data)
       switch (data.type) {
+        case 'game:chapter_snapshot': {
+          // server snapshot for late-connecting clients: reload game state
+          try {
+            await loadGameRoom()
+          } catch (err) { console.error('Error loading game from snapshot:', err) }
+          break
+        }
+
         case 'game:chapter_created': {
           const chapterNumber = data.data?.chapter_number
           const chapters = await apiGames.listChapters(gameId.value)

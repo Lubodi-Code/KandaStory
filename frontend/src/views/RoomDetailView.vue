@@ -55,13 +55,14 @@
           <button
             @click="toggleReady"
             :disabled="!hasSelectedCharacterForCurrentUser"
-              :class="[
-              isUserReady ? 'btn-gold' : 'btn-gold/70',
+            :class="[
+              isUserReady ? 'bg-gold-400 text-navy-900 font-bold shadow-lg hover:bg-gold-300' : 'bg-gold-300/90 text-navy-900 font-semibold shadow-md hover:bg-gold-300/95',
               !hasSelectedCharacterForCurrentUser ? 'opacity-50 cursor-not-allowed' : ''
             ]"
-            class="w-full font-medium"
+            class="w-full py-3 rounded-md"
           >
-            {{ isUserReady ? '✓ Listo' : 'Marcar como Listo' }}
+            <span v-if="isUserReady">✓ Listo</span>
+            <span v-else>Marcar como Listo</span>
           </button>
           <p v-if="!hasSelectedCharacterForCurrentUser" class="text-xs text-rose-400 mt-2 text-center">
             Debes seleccionar un personaje antes de marcarte como listo.
@@ -244,37 +245,40 @@
         </div>
 
         <!-- Mis personajes -->
-        <div class="bg-white rounded-lg shadow-md p-4" v-if="room.game_state === 'waiting'">
-          <h3 class="text-lg font-semibold mb-4">Mis Personajes</h3>
-          <div class="space-y-2 max-h-64 overflow-y-auto">
-            <div
-              v-for="character in myCharacters"
-              :key="character._id"
-              class="relative p-3 border rounded cursor-pointer transition-all duration-200"
-              :class="selectedCharacterId === character._id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'"
-              @click="showCharacterOptions(character)"
-              @mouseenter="showTooltip(character, $event)"
-              @mouseleave="hideTooltip"
-            >
-              <div class="font-medium text-sm">{{ character.name }}</div>
-              <div class="text-xs text-gray-500 mt-1">
-                {{ (character.background || '').substring(0, 60) }}{{ (character.background?.length || 0) > 60 ? '...' : '' }}
-              </div>
-
-              <div v-if="selectedCharacterId === character._id" class="absolute top-2 right-2">
-                <span class="text-blue-500 text-lg">✓</span>
+        <div class="card-navy rounded-lg shadow-md p-4" v-if="room.game_state === 'waiting'">
+          <h3 class="text-lg font-semibold mb-4 text-gold-400">Mis Personajes</h3>
+          <div class="space-y-3 max-h-64 overflow-y-auto">
+              <div
+                v-for="character in myCharacters"
+                :key="character._id"
+                class="relative p-4 rounded-lg cursor-pointer transition transform duration-200 bg-navy-900/20 border border-emerald-800"
+                :class="selectedCharacterId === character._id ? 'ring-2 ring-emerald-400 bg-navy-900/60 shadow-lg scale-105' : 'hover:-translate-y-0.5 hover:scale-105 hover:shadow-lg'"
+                @click="showCharacterOptions(character)"
+                @mouseenter="showTooltip(character, $event)"
+                @mouseleave="hideTooltip"
+              >
+                <div class="flex items-center justify-between">
+                  <div>
+                    <div class="font-semibold text-emerald-200">{{ character.name }}</div>
+                    <div class="text-xs text-slate-300 mt-1">
+                      {{ (character.background || '').substring(0, 70) }}{{ (character.background?.length || 0) > 70 ? '...' : '' }}
+                    </div>
+                  </div>
+                  <div v-if="selectedCharacterId === character._id" class="ml-3">
+                    <span class="inline-flex items-center px-2 py-1 rounded text-xs bg-emerald-500 text-navy-900 font-semibold">✓ Seleccionado</span>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
 
-          <router-link to="/characters" class="block mt-4 text-center bg-gray-100 text-gray-700 py-2 px-4 rounded hover:bg-gray-200">
-            Crear Nuevo Personaje
-          </router-link>
+            <router-link to="/characters" class="block mt-4 text-center bg-gold-400 text-navy-900 py-2 px-4 rounded hover:bg-gold-300 font-medium">
+              Crear Nuevo Personaje
+            </router-link>
         </div>
 
         <!-- Personajes seleccionados -->
-        <div class="bg-white rounded-lg shadow-md p-4">
-          <h3 class="text-lg font-semibold mb-4">Personajes en Juego</h3>
+        <div class="card-navy rounded-lg shadow-md p-4">
+          <h3 class="text-lg font-semibold mb-4 text-gold-400">Personajes en Juego</h3>
           <div class="space-y-3">
             <div
               v-for="selected in room.selected_characters"
@@ -316,47 +320,47 @@
         </div>
 
         <!-- Configuración (solo admin) -->
-        <div class="bg-white rounded-lg shadow-md p-4" v-if="isAdmin">
-          <h3 class="text-lg font-semibold mb-4">Configuración</h3>
+        <div class="card-navy rounded-lg shadow-md p-4" v-if="isAdmin">
+          <h3 class="text-lg font-semibold mb-4 text-gold-400">Configuración</h3>
           <div class="space-y-3 text-sm">
             <div>
-              <label class="block text-gray-700 mb-1">Tiempo de discusión (segundos)</label>
+              <label class="block text-emerald-200 mb-1">Tiempo de discusión (segundos)</label>
               <input
                 v-model.number="room.discussion_time"
                 type="number"
                 min="30"
                 max="600"
                 @change="updateRoomSettings"
-                class="w-full px-2 py-1 border border-gray-300 rounded"
+                class="w-full px-2 py-1 border border-emerald-800 rounded bg-navy-900/30 text-white"
               />
             </div>
             <div>
-              <label class="block text-gray-700 mb-1">Máximo de capítulos</label>
+              <label class="block text-emerald-200 mb-1">Máximo de capítulos</label>
               <input
                 v-model.number="room.max_chapters"
                 type="number"
                 min="1"
                 max="20"
                 @change="updateRoomSettings"
-                class="w-full px-2 py-1 border border-gray-300 rounded"
+                class="w-full px-2 py-1 border border-emerald-800 rounded bg-navy-900/30 text-white"
               />
-              <p class="text-xs text-gray-400 mt-1">Valor entre 1 y 20.</p>
+              <p class="text-xs text-slate-400 mt-1">Valor entre 1 y 20.</p>
             </div>
             <div>
-              <label class="flex items-center space-x-2">
+              <label class="flex items-center space-x-2 text-emerald-200">
                 <input v-model="room.auto_continue" type="checkbox" @change="updateRoomSettings" class="rounded" />
                 <span>Continuar automáticamente</span>
               </label>
             </div>
             <div v-if="!room.auto_continue">
-              <label class="block text-gray-700 mb-1">Tiempo para continuar (segundos)</label>
+              <label class="block text-emerald-200 mb-1">Tiempo para continuar (segundos)</label>
               <input
                 v-model.number="room.continue_time"
                 type="number"
                 min="10"
                 max="300"
                 @change="updateRoomSettings"
-                class="w-full px-2 py-1 border border-gray-300 rounded"
+                class="w-full px-2 py-1 border border-emerald-800 rounded bg-navy-900/30 text-white"
               />
             </div>
           </div>
@@ -558,12 +562,13 @@ function handleWs(type: string, data: any) {
     case 'game_started': {
       const gameId = data?.game_id
       if (gameId) {
+        console.log('[WS] Game started, redirecting to:', gameId)
         // Desconectar WS del room antes de redirigir
         if (ws.value) {
           shouldReconnect.value = false
           ws.value.close()
         }
-        router.replace({ name: 'game', params: { id: gameId } })
+        router.replace(`/game/${gameId}`)
       }
       break
     }
@@ -572,12 +577,13 @@ function handleWs(type: string, data: any) {
       // Fallback si no llegó game_started, también salir del lobby
       const gameId = (room.value as any)?.game_id
       if (gameId) {
+        console.log('[WS] Room closed, redirecting to game:', gameId)
         // Desconectar WS del room antes de redirigir
         if (ws.value) {
           shouldReconnect.value = false
           ws.value.close()
         }
-        router.replace({ name: 'game', params: { id: gameId } })
+        router.replace(`/game/${gameId}`)
       } else {
         router.replace({ name: 'rooms' })
       }
@@ -619,13 +625,14 @@ function handleWs(type: string, data: any) {
       break
     }
     case 'room:started': {
+      console.log('[WS] Room started event received:', data)
       isStartingGame.value = true
       const gameId = data?.game_id
       if (gameId) {
         // Pequeño delay para mostrar el estado de "iniciando"
         setTimeout(() => {
           if (ws.value) { shouldReconnect.value = false; try { ws.value.close() } catch {} }
-          router.replace({ name: 'game', params: { id: gameId } })
+          router.replace(`/game/${gameId}`)
         }, 1000)
       }
       break
@@ -767,14 +774,59 @@ function scrollToBottom() {
 async function startGame() {
   if (!canStartGame.value) return
   isStartingGame.value = true
+  
   try {
-    const resp = await apiClient.post(`/rooms/${roomId}/start-game`)
+    // ✅ Timeout corto: solo queremos el gameId
+    const resp = await apiClient.post(`/rooms/${roomId}/start-game`, {}, { timeout: 8000 })
     const gid = resp?.data?.game_id || (room.value as any)?.game_id
-    if (gid) router.replace(`/game/${gid}`)
+    if (gid) {
+      // Navegar inmediatamente
+      if (ws.value) { shouldReconnect.value = false; try { ws.value.close() } catch {} }
+      router.replace(`/game/${gid}`)
+      return
+    }
+    throw new Error('No game_id in response')
   } catch (error: any) {
-    console.error('Error starting game:', error?.response?.data || error)
-    alert(error?.response?.data?.detail || 'Error al iniciar el juego')
-    isStartingGame.value = false
+    console.error('Error starting game (will try fallback):', error?.response?.data || error)
+    
+    // ✅ Fallback 1: El juego se está creando en background, escuchar WS
+    if (error?.code === 'ECONNABORTED' || error?.message?.includes('timeout')) {
+      console.log('[startGame] Request timeout, waiting for WebSocket confirmation...')
+      // El WS ya maneja game_started y room:started
+      return
+    }
+    
+    // ✅ Fallback 2: Polling a /api/games/my
+    console.log('[startGame] Trying polling fallback...')
+    const startTime = Date.now()
+    const poll = async () => {
+      if (Date.now() - startTime > 25000) {
+        throw new Error('Game start timeout after 25s')
+      }
+      try {
+        const { data: games } = await apiClient.get('/games/my')
+        const latestGame = games?.find((g: any) => 
+          g.room_id === roomId && 
+          new Date(g.created_at).getTime() > startTime - 5000
+        )
+        if (latestGame?.id || latestGame?._id) {
+          const gameId = latestGame.id || latestGame._id
+          if (ws.value) { shouldReconnect.value = false; try { ws.value.close() } catch {} }
+          router.replace(`/game/${gameId}`)
+          return
+        }
+      } catch (pollError) {
+        console.error('Polling error:', pollError)
+      }
+      // Reintentar en 2s
+      setTimeout(poll, 2000)
+    }
+    
+    poll().catch((pollError) => {
+      console.error('Polling failed:', pollError)
+      alert('No se pudo iniciar el juego después de varios intentos. Por favor, intenta de nuevo.')
+      isStartingGame.value = false
+    })
   }
 }
 

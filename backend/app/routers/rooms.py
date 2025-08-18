@@ -6,6 +6,7 @@ from app.models.schemas import (
     ChatMessage, PlayerAction, RoomMessage
 )
 from app.core.database import get_db
+from app.routers.auth import get_current_user
 from app.services.ai_service import generate_story_chapter, generate_story_chapter_async, AIService
 from app.services.games_factory import create_game_from_room
 from bson import ObjectId
@@ -532,23 +533,26 @@ async def select_character(room_id: str, selection: CharacterSelection, db=Depen
     return {"message": "Personaje seleccionado correctamente"}
 
 
-@router.get("/rooms/my-room")
+@router.get("/my-room")
 async def get_my_room(db=Depends(get_db), user=Depends(get_current_user)):
     """Obtener la sala del usuario actual"""
     try:
         uid = str(user["_id"])
         
-        # Buscar sala donde el usuario es miembro
-        room = await _rooms(db).find_one({"member_ids": uid})
+        # Buscar sala donde el usuario es miembro y que esté activa
+        room = await _rooms(db).find_one({
+            "member_ids": uid,
+            "game_state": {"$in": ["waiting", "character_selection"]}  # Solo salas activas
+        })
         
         if not room:
-            return None
+            return {"room": None, "message": "No tienes salas activas"}
         
         # Convertir ObjectId a string
         room["_id"] = str(room["_id"])
         room["id"] = room["_id"]
         
-        # Obtener informaciÃ³n de los miembros
+        # Obtener información de los miembros
         members = []
         for member_id in room.get("member_ids", []):
             try:
@@ -565,7 +569,7 @@ async def get_my_room(db=Depends(get_db), user=Depends(get_current_user)):
         
         room["members"] = members
         
-        # Obtener informaciÃ³n del mundo si existe
+        # Obtener información del mundo si existe
         if room.get("world_id"):
             try:
                 world = await _worlds(db).find_one({"_id": ObjectId(room["world_id"])})
@@ -577,7 +581,7 @@ async def get_my_room(db=Depends(get_db), user=Depends(get_current_user)):
                 print(f"Error getting world: {e}")
                 pass
         
-        return room
+        return {"room": room}
     except Exception as e:
         print(f"Error in get_my_room: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
@@ -875,4 +879,38 @@ async def update_room(room_id: str, payload: dict, db=Depends(get_db), user=Depe
 
     await _rooms(db).update_one({"_id": _oid(room_id)}, {"$set": update_doc})
     return {"ok": True, "message": "Sala actualizada", "updated": update_doc}
+
+
+@router.post("/rooms/{room_id}/hard-delete")
+async def hard_delete_room(room_id: str, db=Depends(get_db), user=Depends(get_current_user)):
+    """Eliminar sala definitivamente después de que el juego haya iniciado.
+    Idempotente: si ya se borró, devuelve 200."""
+    try:
+        room_oid = _oid(room_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID de sala inválido")
+    
+    # Verificar permisos: admin/owner o miembro de la sala relacionada al juego
+    room = await _rooms(db).find_one({"_id": room_oid}, {"admin_id": 1, "member_ids": 1, "game_id": 1})
+    if room:
+        uid = str(user["_id"])
+        is_admin = str(room.get("admin_id")) == uid
+        is_member = uid in (room.get("member_ids", []) or [])
+        if not (is_admin or is_member):
+            raise HTTPException(status_code=403, detail="No tienes permisos para eliminar esta sala")
+    
+    # Idempotente: si ya no existe, devolver ok
+    res = await _rooms(db).delete_one({"_id": room_oid})
+    
+    # Broadcast opcional por si queda alguien conectado en WS de sala
+    try:
+        from .websockets import manager
+        await manager.broadcast_to_room({"type": "room_deleted", "data": {"room_id": room_id}}, f"room:{room_id}")
+        # Cerrar conexiones WebSocket de la sala si existen
+        if hasattr(manager, 'close_room_connections'):
+            await manager.close_room_connections(room_id)
+    except Exception:
+        pass
+    
+    return {"deleted": True, "was_found": res.deleted_count > 0}
 

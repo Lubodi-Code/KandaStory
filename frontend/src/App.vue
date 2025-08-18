@@ -37,7 +37,9 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import { useAuthStore } from './stores/auth'
-import logoUrl from './public/img/Logo.png'
+
+// Use the Logo2.png under src/public/img — build-friendly URL so Vite resolves the asset
+const logoUrl = new URL('./public/img/Logo2.png', import.meta.url).href
 
 const authStore = useAuthStore()
 

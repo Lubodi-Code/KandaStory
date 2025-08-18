@@ -89,32 +89,126 @@ async def open_action_phase(db, game: dict):
     except Exception as e:
         print(f"Error starting action phase timer: {e}")
 
-async def _finalize_actions_and_generate_next(db, game_id: ObjectId):
-    """Cierra la fase de acciones y genera el siguiente capítulo."""
+async def _open_action_phase_idempotent(db, game_id: ObjectId, expected_chapter: int) -> bool:
+    """Helper idempotente para abrir action_phase desde estado playing."""
     try:
-        print(f"[finalize] Attempting to close action phase for game {game_id}")
+        game = await _games(db).find_one({"_id": game_id})
+        if not game:
+            return False
+            
+        settings = game.get("settings", {})
+        seconds = int(settings.get("discussion_time", 300) or 300)
+        ends_at = datetime.utcnow() + timedelta(seconds=seconds)
         
-        # Candado para evitar doble ejecución - lock atómico
+        print(f"[_open_action_phase_idempotent] Attempting to open action phase for game {game_id}, chapter {expected_chapter}")
+        
         res = await _games(db).update_one(
-            {"_id": game_id, "advancing": {"$ne": True}},
-            {"$set": {"advancing": True}}
+            {
+                "_id": game_id, 
+                "game_state": "playing", 
+                "current_chapter": expected_chapter
+            },
+            {
+                "$set": {
+                    "game_state": "action_phase",
+                    "action_phase": {
+                        "open": True,
+                        "started_at": datetime.utcnow().isoformat(),
+                        "ends_at": ends_at.isoformat(),
+                        "seconds_total": seconds,
+                    },
+                    "continue_ready": []
+                }
+            }
         )
         
         if res.modified_count == 0:
-            print(f"[finalize] Phase already closing/advancing for game {game_id}, skipping")
+            print(f"[_open_action_phase_idempotent] Action phase already open or conditions not met for game {game_id}")
+            return False
+        
+        print(f"[_open_action_phase_idempotent] Action phase opened successfully for game {game_id}")
+        
+        # Broadcast phase change
+        await _broadcast_game(db, str(game_id), {
+            "type": "game:action_phase_started",
+            "data": {
+                "ends_at": ends_at.isoformat(),
+                "seconds_total": seconds,
+                "auto_continue": bool(settings.get("auto_continue", False))
+            }
+        })
+        
+        # Programa timer
+        try:
+            from .websockets import manager
+            await manager.schedule_action_phase_timer(str(game_id), ends_at.isoformat(), db)
+            print(f"[_open_action_phase_idempotent] Timer scheduled for action phase")
+        except Exception as timer_err:
+            print(f"[_open_action_phase_idempotent] Error scheduling timer: {timer_err}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"[_open_action_phase_idempotent] Error: {e}")
+        return False
+
+async def _finalize_actions_and_generate_next(db, game_id: ObjectId, expected_chapter: int | None = None):
+    """Cierra la fase de acciones y genera el siguiente capítulo."""
+    try:
+        print(f"[finalize] Attempting to close action phase for game {game_id}")
+
+        # Si no pasaron expected_chapter, leerlo una vez (pero mejor pasarlo desde los triggers)
+        if expected_chapter is None:
+            doc = await _games(db).find_one({"_id": game_id}, {"current_chapter": 1, "game_state": 1})
+            if not doc or doc.get("game_state") != "action_phase":
+                return
+            expected_chapter = int(doc.get("current_chapter") or 0)
+
+        # Small debounce: if action_phase was opened very recently, wait a short moment
+        try:
+            cur = await _games(db).find_one({"_id": game_id}, {"action_phase.started_at": 1, "game_state": 1, "current_chapter": 1})
+            if cur and cur.get("game_state") == "action_phase":
+                started_at_iso = (cur.get("action_phase") or {}).get("started_at")
+                if started_at_iso:
+                    try:
+                        started_at = datetime.fromisoformat(started_at_iso)
+                        delta = (datetime.utcnow() - started_at).total_seconds()
+                        # Si la fase se abrió hace menos de 1s, esperar el resto
+                        if delta < 1.0:
+                            wait = 1.0 - delta
+                            print(f"[finalize] Debounce: waiting {wait:.2f}s before attempting finalize for game {game_id}")
+                            await asyncio.sleep(wait)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Lock + idempotencia por capítulo + marcar "closing" inmediatamente
+        res = await _games(db).update_one(
+            {
+                "_id": game_id,
+                "advancing": {"$ne": True},
+                "game_state": "action_phase",
+                "current_chapter": expected_chapter,  # 🔒 solo cerrar la fase de ESTE capítulo
+            },
+            {"$set": {"advancing": True, "game_state": "closing"}},  # ← marcar closing inmediatamente
+        )
+        if res.modified_count == 0:
+            print(f"[finalize] Phase already closing/changed for game {game_id}, skipping")
             return
 
-        print(f"[finalize] Lock acquired, generating next chapter for game {game_id}")
+        print(f"[finalize] Lock acquired and marked as closing, generating next chapter for game {game_id}")
+        
+        # Broadcast inmediato que estamos generando
+        await _broadcast_game(db, str(game_id), {
+            "type": "game:phase_changed",
+            "data": {"phase": "closing", "message": "Escribiendo el capítulo..."}
+        })
         
         try:
-            # Generar siguiente capítulo
             await advance_to_next_chapter(db, str(game_id))
         finally:
-            # Liberar lock
-            await _games(db).update_one(
-                {"_id": game_id}, 
-                {"$unset": {"advancing": ""}}
-            )
+            await _games(db).update_one({"_id": game_id}, {"$unset": {"advancing": ""}})
             print(f"[finalize] Lock released for game {game_id}")
         
     except Exception as e:
@@ -130,13 +224,9 @@ async def _finalize_actions_and_generate_next(db, game_id: ObjectId):
 
 
 async def maybe_open_actions_or_continue(db, game: dict):
-    """Decide si abrir acciones o auto-continuar (según settings)."""
-    settings = game.get("settings", {})
-    if settings.get("allow_suggestions", True) and not settings.get("auto_continue", False):
-        await open_action_phase(db, game)
-    else:
-        # auto-continúa inmediatamente (genera próximo capítulo)
-        await advance_to_next_chapter(db, str(game["_id"]))
+    """DEPRECATED: Ahora la transición playing -> action_phase se maneja via POST /games/{id}/continue"""
+    print(f"[maybe_open_actions_or_continue] DEPRECATED: Use POST /games/{{id}}/continue for phase transitions")
+    pass
 
 async def advance_to_next_chapter(db, game_id: str):
     """Genera el siguiente capítulo usando IA"""
@@ -249,22 +339,79 @@ async def advance_to_next_chapter(db, game_id: str):
                 "data": {"game_id": game_id}
             })
         else:
-            print(f"[advance] Game continues, updating to chapter {new_num}")
+            # ✅ Abrir directamente la fase de acciones del nuevo capítulo
+            print(f"[advance] Game continues, opening action_phase for chapter {new_num}")
+            
+            settings = game.get("settings", {})
+            discussion_seconds = int(settings.get("discussion_time", 300) or 300)
+            ends_at = datetime.utcnow() + timedelta(seconds=discussion_seconds)
+            
             await _games(db).update_one(
                 {"_id": ObjectId(game_id)}, 
                 {
                     "$set": {
                         "current_chapter": new_num, 
-                        "game_state": "playing",
+                        "game_state": "action_phase",  # ← abrir fase de acciones YA
+                        "action_phase": {
+                            "open": True,
+                            "started_at": datetime.utcnow().isoformat(),
+                            "ends_at": ends_at.isoformat(),
+                            "seconds_total": discussion_seconds,
+                        },
+                        "continue_ready": [],
                         "updated_at": datetime.utcnow().isoformat(),
                     },
                     "$unset": {
-                        "action_phase": "",
-                        "continue_ready": "",
                         "advancing": ""
                     }
                 }
             )
+            
+            # Obtener miembros para broadcast
+            members = [m async for m in _game_members(db).find({"game_id": game_id})]
+            total_members = len(members)
+            
+            # Orden de broadcasts: 1) capítulo creado, 2) fase cambiada, 3) listos reseteados
+            print(f"[advance] Broadcasting chapter_created event")
+            await _broadcast_game(db, game_id, {
+                "type": "game:chapter_created",
+                "data": {
+                    "chapter_number": new_num,
+                    "discussion_seconds": discussion_seconds
+                }
+            })
+            
+            print(f"[advance] Broadcasting action_phase_started event")
+            await _broadcast_game(db, game_id, {
+                "type": "game:action_phase_started",
+                "data": {
+                    "ends_at": ends_at.isoformat(),
+                    "seconds_total": discussion_seconds,
+                    "auto_continue": bool(settings.get("auto_continue", False))
+                }
+            })
+            
+            await _broadcast_game(db, game_id, {
+                "type": "game:phase_changed",
+                "data": {"phase": "action_phase"}
+            })
+            
+            await _broadcast_game(db, game_id, {
+                "type": "game:continue_update",
+                "data": {
+                    "ready_count": 0,
+                    "total": total_members,
+                    "remaining_seconds": discussion_seconds
+                }
+            })
+            
+            # Programar timer
+            try:
+                from .websockets import manager
+                await manager.schedule_action_phase_timer(str(game_id), ends_at.isoformat(), db)
+                print(f"[advance] Timer scheduled for action phase")
+            except Exception as timer_err:
+                print(f"[advance] Error scheduling timer: {timer_err}")
         
         print(f"[advance] Game state updated successfully")
         
@@ -277,90 +424,6 @@ async def advance_to_next_chapter(db, game_id: str):
             print(f"[advance] Actions archived for chapter {current_chapter}")
         except Exception as e:
             print(f"[advance] Error archiving actions: {e}")
-        
-        # Broadcast del nuevo capítulo
-        settings = game.get("settings", {})
-        discussion_seconds = int(settings.get("discussion_time", 300) or 300)
-        
-        print(f"[advance] Broadcasting chapter_created event")
-        await _broadcast_game(db, game_id, {
-            "type": "game:chapter_created",
-            "data": {
-                "chapter_number": new_num,
-                "discussion_seconds": discussion_seconds
-            }
-        })
-        
-        # ✅ Abrir de inmediato la siguiente fase de acciones si no terminó la serie
-        if new_num < max_chapters:
-            try:
-                # Evitar duplicar apertura de fase
-                settings = game.get("settings", {})
-                discussion_seconds = int(settings.get("discussion_time", 300) or 300)
-                ends_at = datetime.utcnow() + timedelta(seconds=discussion_seconds)
-                
-                res = await _games(db).update_one(
-                    {
-                        "_id": ObjectId(game_id), 
-                        "game_state": {"$ne": "action_phase"}, 
-                        "current_chapter": new_num
-                    },
-                    {
-                        "$set": {
-                            "game_state": "action_phase",
-                            "action_phase": {
-                                "open": True,
-                                "started_at": datetime.utcnow().isoformat(),
-                                "ends_at": ends_at.isoformat(),
-                                "seconds_total": discussion_seconds,
-                            },
-                            "continue_ready": []
-                        }
-                    }
-                )
-                
-                if res.modified_count > 0:
-                    print(f"[advance] Opened action phase for chapter {new_num}")
-                    await _broadcast_game(db, game_id, {
-                        "type": "game:action_phase_started",
-                        "data": {
-                            "ends_at": ends_at.isoformat(),
-                            "seconds_total": discussion_seconds,
-                            "remaining_seconds": discussion_seconds
-                        }
-                    })
-                    
-                    # ✅ 1) Arrancar timer de fase para el canal game:{game_id}
-                    try:
-                        from .websockets import manager
-                        await manager.schedule_action_phase_timer(game_id, ends_at.isoformat(), db)
-                        print(f"[advance] Timer scheduled for action phase")
-                    except Exception as timer_err:
-                        print(f"[advance] Error scheduling timer: {timer_err}")
-                    
-                    # ✅ 2) Broadcast inicial: 0 listos para refrescar UI
-                    members = [m async for m in _game_members(db).find({"game_id": game_id})]
-                    await _broadcast_game(db, game_id, {
-                        "type": "game:continue_update",
-                        "data": {
-                            "ready_count": 0, 
-                            "total": len(members), 
-                            "remaining_seconds": discussion_seconds
-                        }
-                    })
-                    print(f"[advance] Reset ready count broadcast sent: 0/{len(members)}")
-                else:
-                    print(f"[advance] Action phase already open or conditions not met for chapter {new_num}")
-                    
-            except Exception as e:
-                print(f"[advance] Error opening action phase: {e}")
-                # Fallback: intentar con la función original
-                try:
-                    updated_game = await _games(db).find_one({"_id": ObjectId(game_id)})
-                    if updated_game and updated_game.get("game_state") != "action_phase":
-                        await open_action_phase(db, updated_game)
-                except Exception as e2:
-                    print(f"[advance] Fallback open_action_phase failed: {e2}")
             
     except Exception as e:
         print(f"Error in advance_to_next_chapter: {e}")
@@ -400,8 +463,8 @@ async def _create_complete_game_from_room(db, room_id: str) -> str:
         "settings": settings.model_dump(),
         "owner_id": room.get("owner_id") or room.get("admin_id"),
         "admin_id": room.get("admin_id"),
-        "current_chapter": 1,  # Comenzamos en capítulo 1
-        "game_state": "playing",
+        "current_chapter": 0,  # ✅ Comenzamos en 0, se incrementará a 1 en background
+        "game_state": "initializing",  # ✅ Estado temporal hasta que se genere el primer capítulo
         "created_at": datetime.utcnow().isoformat(),
     }
     res = await _games(db).insert_one(game_doc)
@@ -426,57 +489,120 @@ async def _create_complete_game_from_room(db, room_id: str) -> str:
     if bulk_members:
         await _game_members(db).insert_many(bulk_members)
 
-    # 🚀 GENERAR PRIMER CAPÍTULO CON IA
-    try:
-        # Cargar mundo y personajes para el contexto de IA
-        world = {}
-        characters = []
+    # ✅ Marcar la room como closing (no borrar aún)
+    await _rooms(db).update_one(
+        {"_id": room_oid},
+        {"$set": {"game_state": "closing", "game_id": str(game_id), "status": "closing"}}
+    )
+
+    # 🚀 GENERAR PRIMER CAPÍTULO EN BACKGROUND (no bloquear respuesta)
+    async def _initialize_game():
         try:
-            world_id = room.get("world_id")
-            if world_id:
-                world = await db["worlds"].find_one({"_id": ObjectId(world_id)}) or {}
-            characters = room.get("selected_characters", []) or []
-        except Exception:
-            pass
+            print(f"[init_game] Starting background initialization for game {game_id}")
+            
+            # Cargar mundo y personajes para el contexto de IA
+            world = {}
+            characters = []
+            try:
+                world_id = room.get("world_id")
+                if world_id:
+                    world = await db["worlds"].find_one({"_id": ObjectId(world_id)}) or {}
+                characters = room.get("selected_characters", []) or []
+            except Exception:
+                pass
 
-        # Generar primer capítulo
-        from app.services.ai_service import AIService
-        ai_service = AIService()
-        first_chapter_text = await ai_service.generate_first_chapter(
-            world=world,
-            characters=characters
-        )
+            # Generar primer capítulo
+            from app.services.ai_service import AIService
+            ai_service = AIService()
+            first_chapter_text = await ai_service.generate_first_chapter(
+                world=world,
+                characters=characters
+            )
 
-        # Guardar el capítulo en game_chapters
-        await _game_chapters(db).insert_one({
-            "game_id": str(game_id),
-            "chapter_number": 1,
-            "content": first_chapter_text,
-            "created_at": datetime.utcnow().isoformat(),
-            "created_by": room.get("admin_id"),
-        })
+            # Guardar el capítulo en game_chapters
+            await _game_chapters(db).insert_one({
+                "game_id": str(game_id),
+                "chapter_number": 1,
+                "content": first_chapter_text,
+                "created_at": datetime.utcnow().isoformat(),
+                "created_by": room.get("admin_id"),
+            })
 
-        print(f"[create_complete_game] First chapter generated for game {game_id}")
+            # Actualizar game a action_phase con capítulo 1
+            settings = room.get("settings", {}) or {}
+            discussion_seconds = int(settings.get("discussion_time", 300) or 300)
+            ends_at = datetime.utcnow() + timedelta(seconds=discussion_seconds)
+            
+            await _games(db).update_one(
+                {"_id": game_id},
+                {"$set": {
+                    "current_chapter": 1,
+                    "game_state": "action_phase",  # ← abrir directamente en action_phase
+                    "action_phase": {
+                        "open": True,
+                        "started_at": datetime.utcnow().isoformat(),
+                        "ends_at": ends_at.isoformat(),
+                        "seconds_total": discussion_seconds,
+                    },
+                    "continue_ready": [],
+                    "updated_at": datetime.utcnow().isoformat(),
+                }}
+            )
 
-        # Marcar la room como started
-        await _rooms(db).update_one(
-            {"_id": room_oid},
-            {"$set": {"game_state": "playing", "game_id": str(game_id)}}
-        )
+            print(f"[init_game] First chapter generated for game {game_id}")
 
-        # Iniciar fase de acciones
-        created_game = await _games(db).find_one({"_id": game_id})
-        if created_game:
-            await open_action_phase(db, created_game)
+            # Broadcast que el juego ha iniciado
+            from .websockets import manager
+            await manager.broadcast_to_room({
+                "type": "game_started",
+                "data": {"game_id": str(game_id)}
+            }, f"room:{room_id}")
 
-        return str(game_id)
+            # Broadcast del primer capítulo y apertura de action_phase
+            await _broadcast_game(db, str(game_id), {
+                "type": "game:chapter_created",
+                "data": {
+                    "chapter_number": 1,
+                    "discussion_seconds": discussion_seconds
+                }
+            })
+            
+            await _broadcast_game(db, str(game_id), {
+                "type": "game:action_phase_started",
+                "data": {
+                    "ends_at": ends_at.isoformat(),
+                    "seconds_total": discussion_seconds,
+                    "auto_continue": bool(settings.get("auto_continue", False))
+                }
+            })
+            
+            await _broadcast_game(db, str(game_id), {
+                "type": "game:phase_changed",
+                "data": {"phase": "action_phase"}
+            })
 
-    except Exception as e:
-        # Si falla la generación, limpiar el juego creado
-        print(f"[create_complete_game] Error generating first chapter: {e}")
-        await _games(db).delete_one({"_id": game_id})
-        await _game_members(db).delete_many({"game_id": str(game_id)})
-        raise ValueError(f"Error al generar el primer capítulo: {e}")
+            # ✅ Programar timer para la primera fase de acciones
+            try:
+                await manager.schedule_action_phase_timer(str(game_id), ends_at.isoformat(), db)
+                print(f"[init_game] Timer scheduled for first action phase")
+            except Exception as timer_err:
+                print(f"[init_game] Error scheduling timer: {timer_err}")
+            
+            print(f"[init_game] Game {game_id} ready with first action phase open.")
+
+        except Exception as e:
+            print(f"[init_game] Error during background initialization: {e}")
+            # Si falla la generación, marcar el juego como fallido
+            await _games(db).update_one(
+                {"_id": game_id}, 
+                {"$set": {"game_state": "failed", "error": str(e)}}
+            )
+
+    # Ejecutar en background
+    import asyncio
+    asyncio.create_task(_initialize_game())
+
+    return str(game_id)
 
 
 @router.post("/from-room/{room_id}", response_model=GameMeta)
@@ -571,7 +697,7 @@ async def get_game(game_id: str, db=Depends(get_db), current_user=Depends(get_cu
 
 @router.post("/{game_id}/continue")
 async def mark_continue(game_id: str, payload: dict | None = None, db=Depends(get_db), current_user=Depends(get_current_user)):
-    """Jugador marca listo/no listo para continuar. Cierra la fase cuando se cumplen las condiciones."""
+    """Jugador marca listo/no listo para continuar. Solo funciona en action_phase."""
     try:
         gid = ObjectId(game_id)
     except Exception:
@@ -581,66 +707,85 @@ async def mark_continue(game_id: str, payload: dict | None = None, db=Depends(ge
     if not game:
         raise HTTPException(status_code=404, detail="Game no encontrado")
 
-    # ✅ Versión tolerante: no hace early-return, evalúa readiness y tiempo
     game_state = game.get("game_state")
-    phase = game.get("action_phase") or {}
-    
+    current_chapter = int(game.get("current_chapter", 0) or 0)
     user_id = str(current_user["_id"])
     ready = bool((payload or {}).get("ready", True))
 
-    # Actualizar lista de ready
-    ready_set = set(str(x) for x in (game.get("continue_ready", []) or []))
-    if ready:
-        ready_set.add(user_id)
-    else:
-        ready_set.discard(user_id)
-
-    # Persistir cambios
-    await _games(db).update_one({"_id": gid}, {"$set": {"continue_ready": list(ready_set)}})
-
-    # Obtener miembros y métricas
-    members = [m async for m in _game_members(db).find({"game_id": game_id})]
-    total = len(members)
-    ready_count = len(ready_set)
-
-    # Calcular remaining_seconds usando phase para cubrir desajustes
-    remaining_seconds = 0
-    time_over = False
-    ends_at_iso = phase.get("ends_at")
-    if ends_at_iso:
-        try:
-            ends_at = datetime.fromisoformat(ends_at_iso)
-            remaining_seconds = max(0, int((ends_at - datetime.utcnow()).total_seconds()))
-            # ✅ Borde de milisegundos: si ya está en 0, trátalo como terminado
-            time_over = (remaining_seconds <= 0) or (datetime.utcnow() >= ends_at)
-        except Exception:
-            pass
-
-    # Debug logs
-    print(f"[continue] game_state={game_state}, ready_count={ready_count}/{total}, require_all={game.get('settings', {}).get('require_all_players', True)}, remaining_seconds={remaining_seconds}, time_over={time_over}")
-
-    # Emitir update inmediato
-    await _broadcast_game(db, game_id, {
-        "type": "game:continue_update",
-        "data": {
-            "ready_count": ready_count,
-            "total": total,
-            "remaining_seconds": remaining_seconds
-        }
-    })
-
-    # Verificar condiciones para cerrar la fase
-    settings = game.get("settings", {})
-    require_all = settings.get("require_all_players", True)
+    # ✅ Solo permitir continue en action_phase
+    if game_state == "closing":
+        raise HTTPException(status_code=409, detail="No se puede marcar listo mientras se genera el capítulo. Espera a que termine.")
     
-    everyone_ready = require_all and ready_count == total and total > 0
-    reached_threshold = (not require_all) and ready_count >= max(1, int(total * 0.6))
+    elif game_state != "action_phase":
+        raise HTTPException(status_code=409, detail=f"No se puede continuar en estado {game_state}")
 
-    if everyone_ready or reached_threshold or time_over:
-        # Encolar tarea en background, responder inmediato
-        asyncio.create_task(_finalize_actions_and_generate_next(db, gid))
+    # Manejar fase de acciones
+    if game_state == "action_phase":
+        phase = game.get("action_phase") or {}
+        
+        # Actualizar lista de ready
+        ready_set = set(str(x) for x in (game.get("continue_ready", []) or []))
+        if ready:
+            ready_set.add(user_id)
+        else:
+            ready_set.discard(user_id)
 
-    return {"ok": True}
+        # Persistir cambios
+        await _games(db).update_one({"_id": gid}, {"$set": {"continue_ready": list(ready_set)}})
+
+        # Obtener miembros y métricas
+        members = [m async for m in _game_members(db).find({"game_id": game_id})]
+        total = len(members)
+        ready_count = len(ready_set)
+
+        # Calcular remaining_seconds usando phase para cubrir desajustes
+        remaining_seconds = 0
+        time_over = False
+        ends_at_iso = phase.get("ends_at")
+        if ends_at_iso:
+            try:
+                ends_at = datetime.fromisoformat(ends_at_iso)
+                remaining_seconds = max(0, int((ends_at - datetime.utcnow()).total_seconds()))
+                # ✅ Borde de milisegundos: si ya está en 0, trátalo como terminado
+                time_over = (remaining_seconds <= 0) or (datetime.utcnow() >= ends_at)
+            except Exception:
+                pass
+
+        # Debug logs
+        print(f"[continue] game_state={game_state}, ready_count={ready_count}/{total}, require_all={game.get('settings', {}).get('require_all_players', True)}, remaining_seconds={remaining_seconds}, time_over={time_over}")
+
+        # Emitir update inmediato
+        await _broadcast_game(db, game_id, {
+            "type": "game:continue_update",
+            "data": {
+                "ready_count": ready_count,
+                "total": total,
+                "remaining_seconds": remaining_seconds
+            }
+        })
+
+        # Verificar condiciones para cerrar la fase
+        settings = game.get("settings", {})
+        require_all = settings.get("require_all_players", True)
+        
+        everyone_ready = require_all and ready_count == total and total > 0
+        reached_threshold = (not require_all) and ready_count >= max(1, int(total * 0.6))
+
+        if everyone_ready or reached_threshold or time_over:
+            # cancelar timer de la fase actual
+            try:
+                from .websockets import manager
+                task = manager.action_phase_tasks.get(str(gid))
+                if task:
+                    task.cancel()
+                manager.action_phase_tasks.pop(str(gid), None)
+            except Exception:
+                pass
+
+            # encolar finalize idempotente por capítulo
+            asyncio.create_task(_finalize_actions_and_generate_next(db, gid, expected_chapter=current_chapter))
+
+        return {"ok": True}
 
 
 @router.get("/{game_id}/members", response_model=List[GameMemberDoc])
@@ -695,10 +840,19 @@ async def propose_action(game_id: str, payload: dict | None = None, db=Depends(g
     action_text = (payload or {}).get("action", "").strip()
     if not action_text:
         raise HTTPException(status_code=422, detail="Campo 'action' es requerido")
-    # Determinar capítulo actual por defecto
+    
+    # Verificar que el juego existe y está en action_phase
     game = await _games(db).find_one({"_id": ObjectId(game_id)})
     if not game:
         raise HTTPException(status_code=404, detail="Game no encontrado")
+    
+    game_state = game.get("game_state")
+    if game_state == "closing":
+        raise HTTPException(status_code=409, detail="No se pueden enviar acciones mientras se genera el capítulo. Espera a que termine.")
+    elif game_state != "action_phase":
+        raise HTTPException(status_code=409, detail=f"No se pueden enviar acciones en estado {game_state}. Espera a que se abra la fase de acciones.")
+    
+    # Determinar capítulo actual
     chap = int((payload or {}).get("chapter_number") or game.get("current_chapter", 1) or 1)
     doc = {
         "game_id": game_id,
@@ -757,7 +911,20 @@ async def propose_action(game_id: str, payload: dict | None = None, db=Depends(g
     # Si ya corresponde, cerrar fase y generar siguiente capítulo en background
     if everyone_ready or reached_threshold or time_over:
         print(f"[propose_action] Conditions met, enqueueing finalize for game {game_id}")
-        asyncio.create_task(_finalize_actions_and_generate_next(db, ObjectId(game_id)))
+        
+        # cancelar timer de la fase actual
+        try:
+            from .websockets import manager
+            task = manager.action_phase_tasks.get(str(game_id))
+            if task:
+                task.cancel()
+            manager.action_phase_tasks.pop(str(game_id), None)
+        except Exception:
+            pass
+
+        # encolar finalize idempotente por capítulo
+        current_chapter = int(game_updated.get("current_chapter", 0) or 0)
+        asyncio.create_task(_finalize_actions_and_generate_next(db, ObjectId(game_id), expected_chapter=current_chapter))
     
     # Broadcast actions updated (optional)
     await _broadcast_game(db, game_id, {"type": "game:actions_updated", "data": {"chapter_number": chap}})

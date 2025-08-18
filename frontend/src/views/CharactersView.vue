@@ -174,7 +174,10 @@
         ]"
         @click="selectedCharacter = idx"
       >
-        <h3 class="text-lg font-bold mb-2 text-emerald-50">{{ character.name }}</h3>
+        <div class="flex justify-between items-center mb-2">
+          <h3 class="text-lg font-bold text-emerald-50">{{ character.name }}</h3>
+          <button @click.stop="editCharacter(character)" class="btn-outline px-3 py-1 text-sm">Editar</button>
+        </div>
         
         <div class="text-sm text-emerald-100 leading-relaxed mb-2">
           <div v-if="character.physical"><strong class="text-emerald-200">Físico:</strong> {{ (character.physical || []).map(t => t.name).join(', ') }}</div>
@@ -198,12 +201,16 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
+import { useRouter } from 'vue-router'
 import TraitInput from '../components/TraitInput.vue'
 import CharacterPreview from '../components/CharacterPreview.vue'
 import { useCharactersStore } from '../stores/characters'
+import { useAuthStore } from '../stores/auth'
 import { apiClient } from '../lib/api'
 
 const charactersStore = useCharactersStore()
+const router = useRouter()
+const authStore = useAuthStore()
 // State from store (ensure reactivity with storeToRefs)
 const { myCharacters: characters } = storeToRefs(charactersStore)
 
@@ -249,6 +256,9 @@ const newCharacter = ref<Character>({
   beliefs: ''
 })
 
+// Editing state: when set, form will update existing character
+const editingCharacterId = ref<string | null>(null)
+
 // Selección local de personaje (index)
 const selectedCharacter = ref<number | null>(null)
 
@@ -273,8 +283,17 @@ async function evaluateCharacter() {
 async function acceptSuggestions() {
   finalizing.value = true
   try {
-    const response = await apiClient.post('/characters', evaluationResult.value!.suggested_corrections)
-    characters.value.push(response.data)
+    const payload = evaluationResult.value!.suggested_corrections
+    if (editingCharacterId.value) {
+      // Update existing character
+      const updated = await charactersStore.updateCharacter(editingCharacterId.value, payload)
+      // Replace locally
+      const idx = characters.value.findIndex(c => c._id === editingCharacterId.value)
+      if (idx !== -1) characters.value[idx] = updated
+    } else {
+      const response = await apiClient.post('/characters', payload)
+      characters.value.push(response.data)
+    }
     resetForm()
   } catch (error: any) {
     console.error('Error creating character:', error)
@@ -287,9 +306,16 @@ async function acceptSuggestions() {
 async function createCharacterDirectly() {
   finalizing.value = true
   try {
-    const response = await apiClient.post('/characters', newCharacter.value)
-    characters.value.push(response.data)
-    resetForm()
+    if (editingCharacterId.value) {
+      const updated = await charactersStore.updateCharacter(editingCharacterId.value, newCharacter.value)
+      const idx = characters.value.findIndex(c => c._id === editingCharacterId.value)
+      if (idx !== -1) characters.value[idx] = updated
+      resetForm()
+    } else {
+      const response = await apiClient.post('/characters', newCharacter.value)
+      characters.value.push(response.data)
+      resetForm()
+    }
   } catch (error: any) {
     console.error('Error creating character:', error)
     alert(error.response?.data?.detail || 'Error al crear personaje')
@@ -320,6 +346,7 @@ function goBackToEdit() {
 function resetForm() {
   showCreateForm.value = false
   evaluationResult.value = null
+  editingCharacterId.value = null
   newCharacter.value = {
     name: '',
     physical: [],
@@ -331,7 +358,37 @@ function resetForm() {
   }
 }
 
-onMounted(() => {
-  loadCharacters()
+function editCharacter(character: Character) {
+  // Prefill form with existing character for editing
+  newCharacter.value = {
+    name: character.name,
+    physical: character.physical || [],
+    mental: character.mental || [],
+    skills: character.skills || [],
+    flaws: character.flaws || [],
+    background: character.background || '',
+    beliefs: character.beliefs || ''
+  }
+  editingCharacterId.value = character._id ?? null
+  showCreateForm.value = true
+  // Scroll to form or focus could be added here
+}
+
+onMounted(async () => {
+  // Ensure user is authenticated before loading characters
+  if (!authStore.isAuthenticated) {
+    router.push('/login')
+    return
+  }
+
+  try {
+    await loadCharacters()
+  } catch (error: any) {
+    console.error('Error loading characters:', error)
+    if (error.response?.status === 401) {
+      authStore.logout()
+      router.push('/login')
+    }
+  }
 })
 </script>

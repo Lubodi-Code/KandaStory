@@ -14,6 +14,19 @@ from app.services.games_factory import create_game_from_room, DEFAULT_CONTINUE_T
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
+# Collection helpers
+def _rooms(db):
+    return db["rooms"]
+
+def _games(db):
+    return db["games"]
+
+def _game_members(db):
+    return db["game_members"]
+
+def _users(db):
+    return db["users"]
+
 class ConnectionManager:
     def __init__(self):
         # Diccionario: room_id -> Set de WebSockets
@@ -83,6 +96,16 @@ class ConnectionManager:
         task = asyncio.create_task(self._run_action_phase_timer(game_id, ends_at_iso, db))
         self.action_phase_tasks[game_id] = task
 
+    def cancel_action_phase_timer(self, game_id: str):
+        """Cancelar timer activo para una fase de acciones"""
+        try:
+            task = self.action_phase_tasks.get(game_id)
+            if task: 
+                task.cancel()
+            self.action_phase_tasks.pop(game_id, None)
+        except Exception:
+            pass
+
     async def _run_action_phase_timer(self, game_id: str, ends_at_iso: str, db):
         """Loop del timer para enviar updates periódicos durante la fase de acciones"""
         try:
@@ -115,7 +138,9 @@ class ConnectionManager:
                 
                 # Si el tiempo se acabó o todos están listos, continuar
                 if remaining <= 0 or (total > 0 and len(ready_list) >= total):
-                    await self._auto_continue_game(game_id, db)
+                    self.cancel_action_phase_timer(game_id)
+                    expected = int(game.get("current_chapter", 0) or 0)
+                    await self._auto_continue_game(game_id, db, expected_chapter=expected)
                     break
                 
                 # Esperar 3 segundos antes del próximo update
@@ -126,14 +151,14 @@ class ConnectionManager:
         except Exception as e:
             print(f"[_run_action_phase_timer] error: {e}")
 
-    async def _auto_continue_game(self, game_id: str, db):
+    async def _auto_continue_game(self, game_id: str, db, expected_chapter: int | None = None):
         """Continuar automáticamente el juego delegando a la función centralizada de games.py"""
         try:
             print(f"[_auto_continue_game] Delegating to centralized finalize function for game {game_id}")
             # Delegar a la función centralizada en games.py (importar dinámicamente para evitar circular imports)
             from .games import _finalize_actions_and_generate_next
             from bson import ObjectId
-            await _finalize_actions_and_generate_next(db, ObjectId(game_id))
+            await _finalize_actions_and_generate_next(db, ObjectId(game_id), expected_chapter=expected_chapter)
         except Exception as e:
             print(f"[_auto_continue_game] error: {e}")
 
@@ -297,15 +322,8 @@ async def handle_continue_ready(room_id: str, user_id: str, db):
         "data": {"ready_count": len(ready), "total": total}
     }, f"game:{game_id}")
     
-    # Si todos están listos, delegar al cierre centralizado
-    if total > 0 and len(ready) >= total:
-        try:
-            # Importar y usar la función centralizada de games.py
-            from .games import _finalize_actions_and_generate_next
-            import asyncio
-            asyncio.create_task(_finalize_actions_and_generate_next(db, ObjectId(game_id)))
-        except Exception as e:
-            print(f"Error delegating to centralized finalize: {e}")
+    # ✅ Quitamos el finalize directo para evitar doble disparo
+    # El cierre lo hará el endpoint HTTP o el timer con el guard de capítulo
 
 async def handle_chat_message(message: dict, room_id: str, user_id: str, username: str, db):
     """Manejar mensaje de chat"""
@@ -495,6 +513,27 @@ async def websocket_game_endpoint(websocket: WebSocket, game_id: str, db=Depends
     channel_key = f"game:{game_id}"
     await manager.connect(websocket, channel_key, user_id)
     
+    # ✅ Auto-delete de la sala cuando se conecta el primer WebSocket del juego
+    try:
+        game = await _games(db).find_one({"_id": ObjectId(game_id)}, {"room_id": 1, "game_state": 1})
+        if game and game.get("room_id"):
+            room_id = str(game["room_id"])
+            # Intentar borrar la sala idempotentemente
+            try:
+                await _rooms(db).delete_one({"_id": ObjectId(room_id)})
+                print(f"[ws.game] Auto-deleted room {room_id} for game {game_id}")
+                # Opcional: cerrar conexiones WebSocket de la sala si las hay
+                room_channel = f"room:{room_id}"
+                if room_channel in manager.active_connections:
+                    await manager.broadcast_to_room({
+                        "type": "room_deleted", 
+                        "data": {"room_id": room_id, "reason": "game_started"}
+                    }, room_channel)
+            except Exception as delete_err:
+                print(f"[ws.game] Error auto-deleting room {room_id}: {delete_err}")
+    except Exception as e:
+        print(f"[ws.game] Error in auto-delete logic: {e}")
+    
     # Enviar estado actual de la fase de acciones si está activa
     try:
         game = await _games(db).find_one({"_id": ObjectId(game_id)})
@@ -508,6 +547,29 @@ async def websocket_game_endpoint(websocket: WebSocket, game_id: str, db=Depends
                     "auto_continue": bool(game.get("settings", {}).get("auto_continue", True))
                 }
             }), websocket)
+            
+        # ✅ Enviar snapshot del capítulo actual para clientes que se conectan tarde
+        if game:
+            try:
+                last_chapter = await db["game_chapters"].find_one(
+                    {"game_id": str(game_id)},
+                    sort=[("chapter_number", -1)]
+                )
+                if last_chapter:
+                    current_chapter = game.get("current_chapter", 0)
+                    await manager.send_personal_message(json.dumps({
+                        "type": "game:chapter_snapshot",
+                        "data": {
+                            "chapter_number": last_chapter.get("chapter_number"),
+                            "current_chapter": current_chapter,
+                            "game_state": game.get("game_state"),
+                            "message": "Chapter snapshot for late connection"
+                        }
+                    }), websocket)
+                    print(f"[ws.game] Sent chapter snapshot {last_chapter.get('chapter_number')} to late-connecting client")
+            except Exception as snapshot_err:
+                print(f"[ws.game] Error sending chapter snapshot: {snapshot_err}")
+                
     except Exception as e:
         print(f"Error sending action phase state: {e}")
     
