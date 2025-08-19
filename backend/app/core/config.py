@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # OpenAI API
     OPENAI_API_KEY: str
     OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_MAX_COMPLETION_TOKENS: int = 1024
     
     # Frontend URL used to build links in emails (include scheme, e.g. https://...)
     FRONTEND_URL: str = "http://localhost:5174"

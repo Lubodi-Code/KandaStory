@@ -108,7 +108,7 @@ class AIService:
                     {"role": "system", "content": SYSTEM_PROMPT_ES},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=1400,
+                max_completion_tokens=1400,
                 temperature=0.8,
             )
             return (response.choices[0].message.content or "").strip()
@@ -230,7 +230,7 @@ class AIService:
                     {"role": "system", "content": SYSTEM_PROMPT_ES},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=1500,
+                max_completion_tokens=1500,
                 temperature=0.8,
             )
             content = (response.choices[0].message.content or "").strip()
@@ -431,7 +431,7 @@ CAPÍTULO {current_chapter}:"""
                 {"role": "system", "content": "Eres un narrador maestro especializado en aventuras colaborativas."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=800,
+            max_completion_tokens=800,
             temperature=0.8
         )
         
