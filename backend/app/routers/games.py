@@ -262,7 +262,10 @@ async def advance_to_next_chapter(db, game_id: str):
                     if room.get("world_id"):
                         w = await db["worlds"].find_one({"_id": ObjectId(room["world_id"])})
                         world = w or {}
-                    characters = room.get("selected_characters", []) or []
+                    # Extraer solo los datos de personajes de selected_characters
+                    selected_chars = room.get("selected_characters", []) or []
+                    characters = [sc.get("character", {}) for sc in selected_chars if sc.get("character")]
+                    print(f"[advance] Extracted {len(characters)} characters from {len(selected_chars)} selections")
         except Exception:
             pass
         
