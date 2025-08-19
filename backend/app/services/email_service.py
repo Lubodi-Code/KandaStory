@@ -63,8 +63,9 @@ def send_verification_email(to_email: str, username: str, verification_token: st
     """Send email verification with HTML template"""
     subject = "✨ Verifica tu cuenta en KandaStory"
     
-    # Use correct frontend URL
-    verification_url = f"http://localhost:5174/verify-email?token={verification_token}"
+    # Use configured frontend URL from settings
+    frontend = settings.FRONTEND_URL.rstrip('/')
+    verification_url = f"{frontend}/verify-email?token={verification_token}"
     
     # Text version
     body_text = f"""

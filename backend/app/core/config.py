@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # OpenAI API
     OPENAI_API_KEY: str
     OPENAI_MODEL: str = "gpt-4o-mini"
+    
+    # Frontend URL used to build links in emails (include scheme, e.g. https://...)
+    FRONTEND_URL: str = "http://localhost:5174"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
