@@ -112,6 +112,15 @@ class AIService:
         """Genera el primer capítulo usando la plantilla solicitada (sin voz de narrador)."""
 
         characters_json = _characters_json(characters)
+
+        # Forzar inclusión: lista de nombres y breve descriptor por personaje para que la IA los trate como protagonistas
+        names = [c.get("name") or c.get("character_name") or "" for c in characters_json]
+        name_list = ", ".join([n for n in names if n])
+        brief_descs = []
+        for c in characters_json:
+            desc = c.get("background") or (c.get("physical") and c.get("physical")[0].get("description") if c.get("physical") else "")
+            brief_descs.append(f"{c.get('name','')}: {desc[:120]}")
+
         prompt = (
             "Plantilla: Primer capítulo (con personajes)\n"
             "Uso: generate_first_chapter(world, characters)\n\n"

@@ -126,8 +126,16 @@ class AIService:
 
     async def generate_first_chapter(self, world: Dict[str, Any], characters: List[Dict[str, Any]]) -> str:
         """Genera el primer capítulo usando la plantilla solicitada (sin voz de narrador)."""
-
         characters_json = _characters_json(characters)
+
+        # Forzar inclusión: lista de nombres y breve descriptor por personaje para que la IA los trate como protagonistas
+        names = [c.get("name") or c.get("character_name") or "" for c in characters_json]
+        name_list = ", ".join([n for n in names if n])
+        brief_descs = []
+        for c in characters_json:
+            desc = c.get("background") or (c.get("physical") and c.get("physical")[0].get("description") if c.get("physical") else "")
+            brief_descs.append(f"{c.get('name','')}: {desc[:120]}")
+
         prompt = (
             "Plantilla: Primer capítulo (con personajes)\n"
             "Uso: generate_first_chapter(world, characters)\n\n"
@@ -135,6 +143,9 @@ class AIService:
             f"Período: {world.get('time_period','')} • Escenario: {world.get('space_setting','')}\n\n"
             f"Personajes seleccionados (JSON): {characters_json}\n\n"
             "Asegúrate de presentar a cada personaje por nombre y rasgos únicos integrados en la acción, no como una ficha.\n\n"
+            f"PARA REFORZAR: FORZAR INCLUSIÓN -> Estos personajes deben aparecer COMO PROTAGONISTAS ACTIVOS en este capítulo: {name_list}.\n"
+            f"Si alguno no puede participar activamente, menciona su nombre y explica brevemente (1 frase) por qué no lo hace, sin apartar la acción principal.\n"
+            f"DESCRIPCIONES BREVES: {brief_descs}\n\n"
             "Objetivo de este capítulo:\n\n"
             "Establecer el escenario, el conflicto inicial y presentar a TODOS los personajes seleccionados en una situación activa.\n"
             "Estilo: tercera persona, inmersivo, sin voz de narrador.\n"
