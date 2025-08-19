@@ -27,7 +27,10 @@ class Settings(BaseSettings):
 
     # OpenAI API
     OPENAI_API_KEY: str
-    OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_MODEL: str = "gpt-4o-mini"  # Modelo estable disponible
+    # Optional tuning for GPT-5 style models (no aplicará con gpt-4o-mini)
+    OPENAI_REASONING_EFFORT: str = "medium"  # minimal | low | medium | high
+    OPENAI_TEXT_VERBOSITY: str = "medium"    # low | medium | high
     
     # Frontend URL used to build links in emails (include scheme, e.g. https://...)
     FRONTEND_URL: str = "http://localhost:5174"

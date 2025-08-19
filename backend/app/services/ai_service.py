@@ -82,6 +82,47 @@ def _player_actions_json(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 class AIService:
     """Servicio de IA para generar capítulos y evaluar personajes"""
 
+    def _completion_kwargs(self, max_completion_tokens: Optional[int] = None) -> dict:
+        """Build kwargs for chat.completions.create supporting GPT-5 params when applicable.
+        - Removes legacy sampling params like temperature/top_p.
+        - If model name suggests GPT-5, pass reasoning/text controls from settings.
+        """
+        kwargs: dict = {}
+        if max_completion_tokens is not None:
+            kwargs["max_completion_tokens"] = max_completion_tokens
+        model = (settings.OPENAI_MODEL or "").lower()
+        if model.startswith("gpt-5"):
+            # Adopt new parameter shapes if supported by client version
+            kwargs["reasoning"] = {"effort": settings.OPENAI_REASONING_EFFORT}
+            kwargs["text"] = {"verbosity": settings.OPENAI_TEXT_VERBOSITY}
+        return kwargs
+
+    def _safe_chat_completion(self, messages: List[Dict[str, str]], max_tokens: Optional[int]) -> Any:
+        """Invoca chat.completions con compatibilidad hacia atrás.
+        Si el cliente no soporta kwargs como `reasoning`/`text`, reintenta sin ellos.
+        """
+        base = {
+            "model": settings.OPENAI_MODEL,
+            "messages": messages,
+        }
+        try:
+            return client.chat.completions.create(
+                **base,
+                **self._completion_kwargs(max_completion_tokens=max_tokens),
+            )
+        except TypeError as te:
+            # SDK antiguo que no acepta nuevos kwargs
+            fb = dict(base)
+            if max_tokens is not None:
+                fb["max_completion_tokens"] = max_tokens
+            return client.chat.completions.create(**fb)
+        except Exception as te:
+            # Cualquier otro error al pasar nuevos kwargs → reintentar básico
+            fb = dict(base)
+            if max_tokens is not None:
+                fb["max_completion_tokens"] = max_tokens
+            return client.chat.completions.create(**fb)
+
     async def generate_first_chapter(self, world: Dict[str, Any], characters: List[Dict[str, Any]]) -> str:
         """Genera el primer capítulo usando la plantilla solicitada (sin voz de narrador)."""
 
@@ -102,14 +143,12 @@ class AIService:
         )
 
         try:
-            response = client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[
+            response = self._safe_chat_completion(
+                [
                     {"role": "system", "content": SYSTEM_PROMPT_ES},
                     {"role": "user", "content": prompt},
                 ],
-                max_completion_tokens=1400,
-                temperature=0.8,
+                max_tokens=1400,
             )
             return (response.choices[0].message.content or "").strip()
         except Exception as e:
@@ -224,16 +263,27 @@ class AIService:
         prompt = "\n".join(prompt_sections)
 
         try:
-            response = client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[
+            print(f"🔍 DEBUG _generate_chapter:")
+            print(f"   Model: {settings.OPENAI_MODEL}")
+            print(f"   Chapter {chapter_index}/{total_chapters}")
+            print(f"   Characters count: {len(characters_json)}")
+            print(f"   Player actions: {len(player_actions) if player_actions else 0}")
+            print(f"   Prompt length: {len(prompt)} chars")
+
+            response = self._safe_chat_completion(
+                [
                     {"role": "system", "content": SYSTEM_PROMPT_ES},
                     {"role": "user", "content": prompt},
                 ],
-                max_completion_tokens=1500,
-                temperature=0.8,
+                max_tokens=1500,
             )
             content = (response.choices[0].message.content or "").strip()
+            
+            print(f"   Response length: {len(content)} chars")
+            if len(content) < 100:
+                print(f"   Full response: '{content}'")
+            else:
+                print(f"   Response preview: {content[:200]}...")
             
             # Asegurar que el capítulo final termine correctamente
             if is_last and not content.strip().endswith("FIN."):
@@ -315,9 +365,10 @@ def evaluate_character(character: dict) -> dict:
     prompt = f"{CHAR_EVAL_PROMPT}\n\nPersonaje a evaluar:\n{json.dumps(character_data, indent=2, ensure_ascii=False)}"
     
     try:
-        resp = client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+        ai_service = AIService()
+        resp = ai_service._safe_chat_completion(
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=None,
         )
         
         # Intentar parsear la respuesta JSON
@@ -347,17 +398,55 @@ def evaluate_character(character: dict) -> dict:
 
 
 def generate_story_chapter(room: dict, characters: list[dict], suggestions: list[str]) -> str:
+    # Normalizar información del mundo (puede venir como dict o string/id)
+    world_obj = room.get('world') or {}
+    if isinstance(world_obj, dict):
+        world_summary = world_obj.get('summary', '') or world_obj.get('name', '')
+        world_logic = world_obj.get('logic', '')
+        time_period = world_obj.get('time_period', '')
+        space_setting = world_obj.get('space_setting', '')
+    else:
+        world_summary = str(world_obj)
+        world_logic = room.get('logic', '')
+        time_period = room.get('time_period', '')
+        space_setting = room.get('space_setting', '')
+
+    # Serializar personajes de forma consistente
+    characters_json = _characters_json(characters)
+
     content = (
-        f"Mundo: {room.get('world')}\nTemática: {room.get('theme')}\n"
-        f"Personajes: {characters}\nSugerencias: {suggestions}\n"
+        f"MUNDO: {world_summary}\nLÓGICA: {world_logic}\nPERÍODO: {time_period}\nESCENARIO: {space_setting}\n\n"
+        f"PERSONAJES: {characters_json}\n\n"
+        f"SUGERENCIAS: {suggestions}\n"
     )
+
     prompt = STORY_GEN_PROMPT + "\n\n" + content
-    resp = client.chat.completions.create(
-        model=settings.OPENAI_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        # Removed temperature for gpt-5-nano compatibility
+
+    # DEBUG: Log temporales para diagnosticar el problema
+    print(f"🔍 DEBUG generate_story_chapter:")
+    print(f"   Model: {settings.OPENAI_MODEL}")
+    print(f"   World summary: {world_summary}")
+    print(f"   Characters count: {len(characters_json)}")
+    print(f"   Prompt length: {len(prompt)} chars")
+    print(f"   Prompt preview: {prompt[:500]}...")
+
+    # Usar wrapper seguro y enviar también el system prompt para guiar el estilo
+    resp = AIService()._safe_chat_completion(
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT_ES},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=1500,
     )
-    return resp.choices[0].message.content.strip()
+
+    result = (resp.choices[0].message.content or "").strip()
+    print(f"   Response length: {len(result)} chars")
+    if len(result) < 100:
+        print(f"   Full response: '{result}'")
+    else:
+        print(f"   Response preview: {result[:200]}...")
+
+    return result
 
 
 async def generate_story_chapter_async(
@@ -425,14 +514,12 @@ Narra en tercera persona, con estilo inmersivo y descriptivo. ¡Que sea memorabl
 CAPÍTULO {current_chapter}:"""
 
     try:
-        response = client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+        response = AIService()._safe_chat_completion(
             messages=[
                 {"role": "system", "content": "Eres un narrador maestro especializado en aventuras colaborativas."},
                 {"role": "user", "content": prompt}
             ],
-            max_completion_tokens=800,
-            temperature=0.8
+            max_tokens=800,
         )
         
         return response.choices[0].message.content.strip()

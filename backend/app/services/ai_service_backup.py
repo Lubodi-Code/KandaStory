@@ -82,6 +82,32 @@ def _player_actions_json(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 class AIService:
     """Servicio de IA para generar capítulos y evaluar personajes"""
 
+    def _completion_kwargs(self, max_completion_tokens: Optional[int] = None) -> dict:
+        kwargs: dict = {}
+        if max_completion_tokens is not None:
+            kwargs["max_completion_tokens"] = max_completion_tokens
+        model = (settings.OPENAI_MODEL or "").lower()
+        if model.startswith("gpt-5"):
+            kwargs["reasoning"] = {"effort": settings.OPENAI_REASONING_EFFORT}
+            kwargs["text"] = {"verbosity": settings.OPENAI_TEXT_VERBOSITY}
+        return kwargs
+
+    def _safe_chat_completion(self, messages: List[Dict[str, str]], max_tokens: Optional[int]):
+        base = {
+            "model": settings.OPENAI_MODEL,
+            "messages": messages,
+        }
+        try:
+            return client.chat.completions.create(
+                **base,
+                **self._completion_kwargs(max_completion_tokens=max_tokens),
+            )
+        except TypeError:
+            fb = dict(base)
+            if max_tokens is not None:
+                fb["max_completion_tokens"] = max_tokens
+            return client.chat.completions.create(**fb)
+
     async def generate_first_chapter(self, world: Dict[str, Any], characters: List[Dict[str, Any]]) -> str:
         """Genera el primer capítulo usando la plantilla solicitada (sin voz de narrador)."""
 
@@ -102,14 +128,12 @@ class AIService:
         )
 
         try:
-            response = client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[
+            response = self._safe_chat_completion(
+                [
                     {"role": "system", "content": SYSTEM_PROMPT_ES},
                     {"role": "user", "content": prompt},
                 ],
-                max_completion_tokens=1400,
-                temperature=0.8,
+                max_tokens=1400,
             )
             return (response.choices[0].message.content or "").strip()
         except Exception as e:
@@ -230,8 +254,7 @@ class AIService:
                     {"role": "system", "content": SYSTEM_PROMPT_ES},
                     {"role": "user", "content": prompt},
                 ],
-                max_completion_tokens=1500,
-                temperature=0.8,
+                **self._completion_kwargs(max_completion_tokens=1500),
             )
             content = (response.choices[0].message.content or "").strip()
             
@@ -312,14 +335,12 @@ class AIService:
         )
 
         try:
-            response = client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[
+            response = self._safe_chat_completion(
+                [
                     {"role": "system", "content": SYSTEM_PROMPT_ES},
                     {"role": "user", "content": prompt},
                 ],
-                max_completion_tokens=1400,
-                temperature=0.85,
+                max_tokens=1400,
             )
             return (response.choices[0].message.content or "").strip()
         except Exception as e:
@@ -396,8 +417,7 @@ class AIService:
                     {"role": "system", "content": SYSTEM_PROMPT_ES},
                     {"role": "user", "content": prompt},
                 ],
-                max_completion_tokens=1400,
-                temperature=0.85,
+                **self._completion_kwargs(max_completion_tokens=1400),
             )
             return (response.choices[0].message.content or "").strip()
         except Exception as e:
@@ -484,10 +504,9 @@ def generate_story_chapter(room: dict, characters: list[dict], suggestions: list
         f"Personajes: {characters}\nSugerencias: {suggestions}\n"
     )
     prompt = STORY_GEN_PROMPT + "\n\n" + content
-    resp = client.chat.completions.create(
-        model=settings.OPENAI_MODEL,
+    resp = AIService()._safe_chat_completion(
         messages=[{"role": "user", "content": prompt}],
-        # Removed temperature for gpt-5-nano compatibility
+        max_tokens=None,
     )
     return resp.choices[0].message.content.strip()
 
@@ -557,14 +576,12 @@ Narra en tercera persona, con estilo inmersivo y descriptivo. ¡Que sea memorabl
 CAPÍTULO {current_chapter}:"""
 
     try:
-        response = client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+        response = AIService()._safe_chat_completion(
             messages=[
                 {"role": "system", "content": "Eres un narrador maestro especializado en aventuras colaborativas."},
                 {"role": "user", "content": prompt}
             ],
-            max_completion_tokens=800,
-            temperature=0.8
+            max_tokens=800,
         )
         
         return response.choices[0].message.content.strip()
