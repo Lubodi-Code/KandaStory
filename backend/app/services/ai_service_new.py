@@ -82,14 +82,14 @@ def _player_actions_json(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 class AIService:
     """Servicio de IA para generar capítulos y evaluar personajes"""
 
-    def _completion_kwargs(self, max_completion_tokens: Optional[int] = None) -> dict:
+    def _completion_kwargs(self, max_tokens: Optional[int] = None) -> dict:
         """Construye kwargs para chat.completions.create con soporte GPT-5.
         - Sin parámetros legacy (temperature, top_p, etc.).
         - Si el modelo es GPT-5, aplica reasoning/text desde settings.
         """
         kwargs: dict = {}
-        if max_completion_tokens is not None:
-            kwargs["max_completion_tokens"] = max_completion_tokens
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         model = (settings.OPENAI_MODEL or "").lower()
         if model.startswith("gpt-5"):
             kwargs["reasoning"] = {"effort": settings.OPENAI_REASONING_EFFORT}
@@ -104,12 +104,12 @@ class AIService:
         try:
             return client.chat.completions.create(
                 **base,
-                **self._completion_kwargs(max_completion_tokens=max_tokens),
+                **self._completion_kwargs(max_tokens=max_tokens),
             )
         except TypeError:
             fb = dict(base)
             if max_tokens is not None:
-                fb["max_completion_tokens"] = max_tokens
+                fb["max_tokens"] = max_tokens
             return client.chat.completions.create(**fb)
 
     async def generate_first_chapter(self, world: Dict[str, Any], characters: List[Dict[str, Any]]) -> str:

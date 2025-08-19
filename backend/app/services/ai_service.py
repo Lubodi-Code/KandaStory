@@ -82,14 +82,15 @@ def _player_actions_json(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 class AIService:
     """Servicio de IA para generar capítulos y evaluar personajes"""
 
-    def _completion_kwargs(self, max_completion_tokens: Optional[int] = None) -> dict:
+    def _completion_kwargs(self, max_tokens: Optional[int] = None) -> dict:
         """Build kwargs for chat.completions.create supporting GPT-5 params when applicable.
         - Removes legacy sampling params like temperature/top_p.
         - If model name suggests GPT-5, pass reasoning/text controls from settings.
         """
         kwargs: dict = {}
-        if max_completion_tokens is not None:
-            kwargs["max_completion_tokens"] = max_completion_tokens
+        if max_tokens is not None:
+            # Use the legacy `max_tokens` name for compatibility with older SDKs/servers.
+            kwargs["max_tokens"] = max_tokens
         model = (settings.OPENAI_MODEL or "").lower()
         if model.startswith("gpt-5"):
             # Adopt new parameter shapes if supported by client version
@@ -108,19 +109,19 @@ class AIService:
         try:
             return client.chat.completions.create(
                 **base,
-                **self._completion_kwargs(max_completion_tokens=max_tokens),
+                **self._completion_kwargs(max_tokens=max_tokens),
             )
-        except TypeError as te:
-            # SDK antiguo que no acepta nuevos kwargs
+        except TypeError:
+            # SDK antiguo que no acepta nuevos kwargs -> reintentar usando `max_tokens`
             fb = dict(base)
             if max_tokens is not None:
-                fb["max_completion_tokens"] = max_tokens
+                fb["max_tokens"] = max_tokens
             return client.chat.completions.create(**fb)
-        except Exception as te:
-            # Cualquier otro error al pasar nuevos kwargs → reintentar básico
+        except Exception:
+            # Cualquier otro error al pasar nuevos kwargs -> reintentar básico con `max_tokens`
             fb = dict(base)
             if max_tokens is not None:
-                fb["max_completion_tokens"] = max_tokens
+                fb["max_tokens"] = max_tokens
             return client.chat.completions.create(**fb)
 
     async def generate_first_chapter(self, world: Dict[str, Any], characters: List[Dict[str, Any]]) -> str:
